@@ -29,7 +29,7 @@ app.add_middleware(
 )
 
 # Constants
-DEFAULT_MODEL = "kimi-k2.5"
+DEFAULT_MODEL = "deepseek-v4-pro"
 IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 # Request/Response models
@@ -54,9 +54,12 @@ def get_env_int(name: str, default: int) -> int:
     except ValueError:
         return default
 
+_APP_DIR = os.path.dirname(os.path.abspath(__file__))
+
 class SQLiteDataTools:
     def __init__(self) -> None:
-        self.db_path = os.getenv("SQLITE_DB_PATH", "supply_chain.db")
+        default_db = os.path.join(_APP_DIR, "supply_chain.db")
+        self.db_path = os.getenv("SQLITE_DB_PATH", default_db)
         self.max_rows = get_env_int("MAX_QUERY_ROWS", 100)
 
     def connect(self) -> sqlite3.Connection:
@@ -243,42 +246,62 @@ TOOLS = [
 ]
 
 SYSTEM_PROMPT = """
-You are a supply-chain analytics chatbot connected to a local SQLite database.
+You are an expert supply-chain analytics assistant connected to a local SQLite database.
+Your goal is to provide DETAILED, INSIGHTFUL, and WELL-FORMATTED answers that impress business stakeholders.
 
-You have access to the following table:
-- **supply_chain_data** with columns:
-  - product_type VARCHAR(100)
-  - sku VARCHAR(50)
-  - price DECIMAL
-  - availability INT
-  - number_of_products_sold INT
-  - revenue_generated DECIMAL
-  - customer_demographics VARCHAR(50)
-  - stock_levels INT
-  - lead_times INT
-  - order_quantities INT
-  - shipping_times INT
-  - shipping_carrier VARCHAR(100)
-  - shipping_costs DECIMAL
-  - supplier_name VARCHAR(100)
-  - location VARCHAR(100)
-  - lead_time_alt INT
-  - production_volumes INT
-  - manufacturing_lead_time INT
-  - manufacturing_costs DECIMAL
-  - inspection_results VARCHAR(50)
-  - defect_rates DECIMAL
-  - transportation_modes VARCHAR(50)
-  - routes VARCHAR(50)
-  - costs DECIMAL
+## Database Schema
+You have access to one table: **supply_chain_data** with these columns:
+- product_type VARCHAR(100) — e.g., skincare, haircare, cosmetics
+- sku VARCHAR(50) — unique product identifier
+- price DECIMAL — product price
+- availability INT — stock availability count
+- number_of_products_sold INT — units sold
+- revenue_generated DECIMAL — total revenue
+- customer_demographics VARCHAR(50) — target customer segment
+- stock_levels INT — current stock levels
+- lead_times INT — delivery lead time in days
+- order_quantities INT — order quantity
+- shipping_times INT — shipping duration in days
+- shipping_carrier VARCHAR(100) — carrier name (e.g., Carrier A, B, C)
+- shipping_costs DECIMAL — cost of shipping
+- supplier_name VARCHAR(100) — supplier name
+- location VARCHAR(100) — supplier/warehouse location
+- lead_time_alt INT — alternative lead time metric
+- production_volumes INT — production volume
+- manufacturing_lead_time INT — manufacturing lead time in days
+- manufacturing_costs DECIMAL — cost of manufacturing
+- inspection_results VARCHAR(50) — QC inspection result (Pass/Fail/Pending)
+- defect_rates DECIMAL — defect rate percentage
+- transportation_modes VARCHAR(50) — mode of transport (Road, Air, Sea, Rail)
+- routes VARCHAR(50) — shipping route identifier
+- costs DECIMAL — total costs
 
-Answer using the database tools whenever the user asks about data, metrics, trends, rankings, exceptions, suppliers, orders, inventory, shipments, demand, warehouses, lead times, costs, fulfillment, production, manufacturing, defects, transportation, or forecasts.
+## Response Guidelines
+When answering questions, you MUST:
 
-Rules:
-- Use read-only SQL only. Query the supply_chain_data table directly for analysis.
-- Prefer concise answers with the important numbers, rankings, and business interpretation.
-- If data is missing or the schema does not support the question, say so and explain what column would be needed.
-- Do not invent column names, metrics, or results.
+1. **Always query the database** — Never guess or make up numbers. Run SQL queries to get real data.
+2. **Run MULTIPLE queries** when needed — Don't settle for one query. Run 2-4 queries to give a comprehensive answer covering different angles (e.g., totals, breakdowns, rankings, comparisons).
+3. **Format beautifully with Markdown**:
+   - Use **bold** for key metrics and numbers
+   - Use bullet points and numbered lists
+   - Use tables when comparing data across categories
+   - Use relevant emojis (📊 📦 🚚 💰 📈 📉 ⚠️ ✅ 🏭 🔍) to make the response visually appealing
+4. **Provide business insights** — Don't just dump numbers. Explain what they MEAN:
+   - What trends do you see?
+   - What's performing well vs poorly?
+   - Are there any red flags or anomalies?
+5. **Give actionable recommendations** — End with 2-3 specific suggestions based on the data.
+6. **Use section headers** — Structure your response with clear headers like:
+   - 📊 Overview
+   - 🔍 Detailed Breakdown
+   - 💡 Key Insights
+   - 🎯 Recommendations
+
+## Rules
+- Use read-only SQL only (SELECT, WITH). Never use INSERT, UPDATE, DELETE.
+- If the schema doesn't support a question, explain what column would be needed.
+- Never invent column names or fabricate results.
+- Always reference actual data from query results.
 """.strip()
 
 def call_tool(tool_name: str, arguments: dict[str, Any], data_tools: SQLiteDataTools) -> dict[str, Any]:
@@ -301,6 +324,7 @@ async def stream_agent_response(
     model = os.getenv("DIGITALOCEAN_MODEL", DEFAULT_MODEL)
     
     for iteration in range(8):
+        print(f"📤 Sending request to LLM (iteration {iteration + 1}/8) - Model: {model}")
         response = await client.chat.completions.create(
             model=model,
             messages=messages,
@@ -310,39 +334,55 @@ async def stream_agent_response(
             stream=True,
         )
         
-        # Collect the full message to check for tool calls
         message_content = ""
         tool_calls = []
-        async for chunk in response:
-            if chunk.choices[0].delta.content:
-                content = chunk.choices[0].delta.content
-                message_content += content
-                yield f"data: {json.dumps({'type': 'token', 'content': content})}\n\n"
-                await asyncio.sleep(0.01)  # Small delay for streaming effect
         
-        # Check if we need to handle tool calls
-        # Re-fetch the full message to get tool calls
-        if iteration < 7:  # Not the last iteration
-            full_response = await client.chat.completions.create(
-                model=model,
-                messages=messages,
-                tools=TOOLS,
-                tool_choice="auto",
-                temperature=0.2,
-                stream=False,
-            )
-            message = full_response.choices[0].message
-            messages.append(message.model_dump(exclude_none=True))
+        async for chunk in response:
+            delta = chunk.choices[0].delta
             
-            if not message.tool_calls:
+            if delta.content:
+                content = delta.content
+                message_content += content
+                # Stream immediately for smooth generation
+                yield f"data: {json.dumps({'type': 'token', 'content': content})}\n\n"
+                await asyncio.sleep(0.01)
+            
+            if delta.tool_calls:
+                for tc in delta.tool_calls:
+                    while len(tool_calls) <= tc.index:
+                        tool_calls.append({
+                            "id": "",
+                            "type": "function",
+                            "function": {"name": "", "arguments": ""}
+                        })
+                    if tc.id:
+                        tool_calls[tc.index]["id"] = tc.id
+                    if tc.function and tc.function.name:
+                        tool_calls[tc.index]["function"]["name"] += tc.function.name
+                    if tc.function and tc.function.arguments:
+                        tool_calls[tc.index]["function"]["arguments"] += tc.function.arguments
+
+        # Check if we need to handle tool calls
+        if iteration < 7:  # Not the last iteration
+            messages.append({
+                "role": "assistant",
+                "content": message_content if message_content else None,
+                **({"tool_calls": tool_calls} if tool_calls else {})
+            })
+            
+            if not tool_calls:
+                # No tool calls — this is the final answer, we already streamed it
                 yield f"data: {json.dumps({'type': 'done'})}\n\n"
                 return
             
+            # Tool calls detected — show a brief status, then process tools
+            yield f"data: {json.dumps({'type': 'token', 'content': '\n\n*🔍 Querying database...*\n\n'})}\n\n"
+            
             # Process tool calls
-            for tool_call in message.tool_calls:
-                function_name = tool_call.function.name
+            for tool_call in tool_calls:
+                function_name = tool_call["function"]["name"]
                 try:
-                    args = json.loads(tool_call.function.arguments or "{}")
+                    args = json.loads(tool_call["function"]["arguments"] or "{}")
                     result = call_tool(function_name, args, data_tools)
                     yield f"data: {json.dumps({'type': 'tool_call', 'tool': function_name, 'args': args})}\n\n"
                 except Exception as exc:
@@ -351,7 +391,7 @@ async def stream_agent_response(
                 messages.append(
                     {
                         "role": "tool",
-                        "tool_call_id": tool_call.id,
+                        "tool_call_id": tool_call["id"],
                         "content": json.dumps(result, default=str),
                     }
                 )
