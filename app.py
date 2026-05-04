@@ -323,8 +323,8 @@ async def stream_agent_response(
     """Stream the agent response token by token."""
     model = os.getenv("DIGITALOCEAN_MODEL", DEFAULT_MODEL)
     
-    for iteration in range(8):
-        print(f"📤 Sending request to LLM (iteration {iteration + 1}/8) - Model: {model}")
+    for iteration in range(100):
+        print(f"📤 Sending request to LLM (iteration {iteration + 1}/100) - Model: {model}")
         response = await client.chat.completions.create(
             model=model,
             messages=messages,
@@ -363,7 +363,7 @@ async def stream_agent_response(
                         tool_calls[tc.index]["function"]["arguments"] += tc.function.arguments
 
         # Check if we need to handle tool calls
-        if iteration < 7:  # Not the last iteration
+        if iteration < 99:  # Not the last iteration
             messages.append({
                 "role": "assistant",
                 "content": message_content if message_content else None,
@@ -466,7 +466,7 @@ async def chat_simple(request: ChatRequest):
         messages.append({"role": "user", "content": request.user_input})
         
         # Non-streaming version
-        for _ in range(8):
+        for _ in range(100):
             response = await client.chat.completions.create(
                 model=os.getenv("DIGITALOCEAN_MODEL", DEFAULT_MODEL),
                 messages=messages,
